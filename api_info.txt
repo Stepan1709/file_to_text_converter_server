@@ -1,0 +1,30 @@
+API для конвертации файлов в текст
+
+Эндпоинты:
+- GET /health - проверка здоровья сервиса и доступности внешних сервисов
+- GET /docs - описание API (этот текст)
+- POST /convert - конвертация файла в текст
+
+Параметры запроса POST /convert:
+- file: файл для конвертации (обязательный)
+- force_ocr__only_pdf: bool, по умолчанию false. Для PDF файлов - принудительно использовать OCR server вместо Docling
+- ocr_images_in_file: bool, по умолчанию false. Для файлов, обрабатываемых через Docling - выполнять OCR для встроенных изображений
+
+Поддерживаемые типы файлов:
+docx, pptx, html, image, pdf, md, csv, xlsx, xml_uspto, xml_jats, json_docling
+
+Ответ:
+{
+    "filename": "имя_файла",
+    "file_text": "извлеченный текст",
+    "worktime": "HH:MM:SS"
+}
+
+Примечания:
+- Для image файлов всегда используется vLLM PaddleOCR-VL
+- Для PDF файлов:
+  * Если force_ocr__only_pdf=true: используется OCR server
+  * Если force_ocr__only_pdf=false: проверяется наличие текста в PDF
+    - Если текст есть: используется Docling (с возможной обработкой изображений)
+    - Если PDF является скан-копией: используется OCR server
+- Для остальных типов файлов используется Docling

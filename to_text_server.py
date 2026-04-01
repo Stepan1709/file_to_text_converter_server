@@ -54,7 +54,7 @@ def convert_unicode_escapes(text: str) -> str:
     return re.sub(pattern, replace_unicode, text)
 
 
-def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp.ClientSession = None) -> str:
+async def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp.ClientSession = None) -> str:
     """
     Удаляет или заменяет изображения в тексте на их OCR результат
     """
@@ -66,7 +66,7 @@ def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp
         return re.sub(pattern, '', text)
 
     # Асинхронная обработка изображений
-    async def process_image_async(match, session):
+    async def process_image_async(match):
         image_data = match.group(0)
         # Извлекаем base64 данные
         base64_match = re.search(r'data:image/[^;]+;base64,([^)]+)', image_data)
@@ -76,9 +76,6 @@ def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp
         image_base64 = base64_match.group(1)
 
         try:
-            # Декодируем base64 в байты
-            image_bytes = base64.b64decode(image_base64)
-
             # Отправляем на OCR в vLLM
             payload = {
                 "model": MODEL_NAME,
@@ -114,7 +111,7 @@ def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp
                     result = await resp.json()
                     ocr_text = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                     if ocr_text:
-                        return f"\n Image OCR: \"{ocr_text}\"\n"
+                        return f" Image OCR: \"{ocr_text}\""
 
         except Exception as e:
             logger.error(f"Ошибка OCR изображения: {e}")
@@ -122,26 +119,21 @@ def clean_images_from_text(text: str, ocr_images: bool = False, session: aiohttp
         # Если OCR не удался или текст пустой, удаляем изображение
         return ''
 
-    # Создаем синхронную обертку для асинхронной функции
-    async def process_all_images(text, session):
-        matches = list(re.finditer(pattern, text))
-        if not matches:
-            return text
+    # Обрабатываем все изображения
+    matches = list(re.finditer(pattern, text))
+    if not matches:
+        return text
 
-        # Обрабатываем изображения последовательно
-        result_text = text
-        offset = 0
-        for match in matches:
-            replacement = await process_image_async(match, session)
-            start, end = match.span()
-            result_text = result_text[:start + offset] + replacement + result_text[end + offset:]
-            offset += len(replacement) - (end - start)
+    # Обрабатываем изображения последовательно
+    result_text = text
+    offset = 0
+    for match in matches:
+        replacement = await process_image_async(match)
+        start, end = match.span()
+        result_text = result_text[:start + offset] + replacement + result_text[end + offset:]
+        offset += len(replacement) - (end - start)
 
-        return result_text
-
-    # Запускаем асинхронную обработку в синхронном контексте
-    # Это будет вызвано из асинхронной функции, поэтому возвращаем coroutine
-    return process_all_images(text, session) if session else text
+    return result_text
 
 
 def is_pdf_scanned(pdf_bytes: bytes) -> bool:
@@ -235,49 +227,71 @@ async def process_with_docling(file_bytes: bytes, filename: str, ocr_images: boo
                     data=form_data
             ) as response:
                 if response.status != 200:
-                    raise Exception(f"Ошибка отправки файла в Docling: {response.status}")
+                    error_text = await response.text()
+                    raise Exception(f"Ошибка отправки файла в Docling: {response.status}, {error_text}")
 
                 result = await response.json()
                 task_id = result.get('task_id')
+
+                if not task_id:
+                    raise Exception("Не получен task_id от Docling")
 
                 # Ожидаем завершения обработки
                 logger.info(f"Ожидание завершения обработки файла {filename}, Task ID: {task_id}")
 
                 check_count = 0
+                last_status = None
+
                 while True:
                     await asyncio.sleep(10)
                     check_count += 1
 
                     # Получаем статус задачи
-                    async with session.get(f"{DOC_URL}/v1/status/poll/{task_id}") as status_response:
-                        if status_response.status != 200:
-                            continue
+                    try:
+                        async with session.get(f"{DOC_URL}/v1/status/poll/{task_id}") as status_response:
+                            if status_response.status != 200:
+                                logger.warning(f"Ошибка получения статуса: {status_response.status}")
+                                continue
 
-                        status_data = await status_response.json()
-                        current_status = status_data.get('task_status')
+                            status_data = await status_response.json()
+                            current_status = status_data.get('task_status')
+                            current_position = status_data.get('task_position', 0)
 
-                        # Логируем каждую третью проверку (30 секунд)
-                        if check_count % 3 == 0:
-                            position = status_data.get('task_position', 0)
-                            logger.info(f"Статус обработки {filename}: {current_status}, позиция: {position}")
+                            # Логируем каждую третью проверку (30 секунд) или при изменении статуса
+                            if check_count % 3 == 0 or current_status != last_status:
+                                logger.info(
+                                    f"Статус обработки {filename}: {current_status}, позиция: {current_position}")
+                                last_status = current_status
 
-                        if current_status in ['success', 'completed', 'finished']:
-                            # Получаем результат
-                            async with session.get(f"{DOC_URL}/v1/result/{task_id}") as result_response:
-                                if result_response.status != 200:
-                                    raise Exception("Не удалось получить результат обработки")
+                            if current_status in ['success', 'completed', 'finished']:
+                                # Получаем результат
+                                async with session.get(f"{DOC_URL}/v1/result/{task_id}") as result_response:
+                                    if result_response.status != 200:
+                                        raise Exception("Не удалось получить результат обработки")
 
-                                result_data = await result_response.json()
-                                # Извлекаем текст из document.md_content
-                                text = result_data.get('document', {}).get('md_content', '')
+                                    result_data = await result_response.json()
+                                    # Извлекаем текст из document.md_content
+                                    text = result_data.get('document', {}).get('md_content', '')
 
-                                # Очищаем текст от изображений
-                                text = await clean_images_from_text(text, ocr_images, session)
+                                    if not text:
+                                        logger.warning(f"Получен пустой текст для файла {filename}")
 
-                                # Конвертируем Unicode escape последовательности
-                                text = convert_unicode_escapes(text)
+                                    # Очищаем текст от изображений
+                                    text = await clean_images_from_text(text, ocr_images, session)
 
-                                return text
+                                    # Конвертируем Unicode escape последовательности
+                                    text = convert_unicode_escapes(text)
+
+                                    return text
+
+                            elif current_status in ['failed', 'error']:
+                                error_msg = status_data.get('error', 'Неизвестная ошибка')
+                                raise Exception(f"Обработка Docling завершилась с ошибкой: {error_msg}")
+
+                    except aiohttp.ClientError as e:
+                        logger.error(f"Сетевая ошибка при проверке статуса: {e}")
+                        continue
+
     except Exception as e:
         logger.error(f"Ошибка обработки через Docling: {e}")
         raise
@@ -300,7 +314,8 @@ async def process_with_ocr_server(file_bytes: bytes, filename: str) -> str:
             # Отправляем на OCR
             async with session.post(f"{OCR_URL}/ocr", data=form_data) as response:
                 if response.status != 200:
-                    raise Exception(f"Ошибка OCR обработки: {response.status}")
+                    error_text = await response.text()
+                    raise Exception(f"Ошибка OCR обработки: {response.status}, {error_text}")
 
                 result = await response.text()
                 return result
@@ -363,7 +378,8 @@ async def process_with_vllm_ocr(file_bytes: bytes, filename: str) -> str:
                     headers=headers
             ) as response:
                 if response.status != 200:
-                    raise Exception(f"Ошибка vLLM обработки: {response.status}")
+                    error_text = await response.text()
+                    raise Exception(f"Ошибка vLLM обработки: {response.status}, {error_text}")
 
                 result = await response.json()
                 text = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()

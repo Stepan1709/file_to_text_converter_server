@@ -1,28 +1,26 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
 
-# Устанавливаем системные зависимости для работы с изображениями и PDF
-RUN apt-get update && apt-get install -y \
-    poppler-utils \
-    libgl1 \
-    libglib2.0-0 \
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Копируем файлы зависимостей
 COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-# Устанавливаем Python зависимости
-RUN pip install --no-cache-dir -r requirements.txt
+COPY config.py to_text_server.py ./
 
-# Копируем исходный код
-COPY to_text_server.py .
-COPY secrets.py .
-COPY config.py .
-COPY api_info.txt .
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
 
-# Открываем порт
 EXPOSE 8999
 
-# Запускаем сервер
-CMD ["uvicorn", "to_text_server:app", "--host", "0.0.0.0", "--port", "8999", "--log-level", "info"]
+# /live не зависит от внешних сервисов, поэтому контейнер не помечается unhealthy при их недоступности
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fs http://localhost:8999/live || exit 1
+
+CMD ["python", "to_text_server.py"]

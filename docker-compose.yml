@@ -1,0 +1,9 @@
+services:
+  file-converter:
+    build: .
+    image: file-converter-server:latest
+    container_name: file-converter
+    env_file: .env
+    ports:
+      - "8999:8999"
+    restart: unless-stopped

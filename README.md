@@ -54,6 +54,7 @@ Client ───────────────────────> fi
 | `VLLM_REQUEST_TIMEOUT`  | `300`                       | Таймаут запроса к vLLM, сек                               |
 | `OCR_REQUEST_TIMEOUT`   | `3600`                      | Таймаут запроса к OCR-серверу, сек                        |
 | `PDF_MIN_TEXT_LENGTH`   | `100`                       | Порог текста, ниже которого PDF считается сканом          |
+| `MAX_UPLOAD_SIZE_MB`    | `200`                       | Максимальный размер загружаемого файла, МБ                |
 | `HOST` / `PORT`         | `0.0.0.0` / `8999`          | Адрес и порт сервиса (в Docker-образе проброшен `8999`)   |
 | `LOG_LEVEL`             | `INFO`                      | Уровень логирования                                       |
 
@@ -83,7 +84,7 @@ docker logs -f --tail 100 file-converter
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 export DOC_URL=http://<host>:9001 VLLM_URL=http://<host>:8400 OCR_URL=http://<host>:9000
-python to_text_server.py
+python -m app
 ```
 
 ## API
@@ -110,7 +111,8 @@ Multipart-форма:
 {"filename": "document.pdf", "file_text": "Извлечённый текст...", "worktime": "0:00:05"}
 ```
 
-Ошибки: `400` — неподдерживаемый тип файла, `500` — ошибка обработки (недоступен внешний сервис, таймаут и т.д.).
+Ошибки: `400` — неподдерживаемый тип или пустой файл, `413` — файл больше `MAX_UPLOAD_SIZE_MB`, `502` — внешний сервис
+(Docling, vLLM, OCR-сервер) недоступен или вернул ошибку, `504` — внешний сервис не ответил вовремя, `500` — прочие ошибки.
 
 ### Примеры
 
@@ -143,3 +145,30 @@ print(result["filename"], len(result["file_text"]), result["worktime"])
   а по истечении `DOCLING_TIMEOUT` запрос завершается ошибкой. OCR больших сканов тоже занимает минуты
   (см. `OCR_REQUEST_TIMEOUT`).
 - **`/health` возвращает `degraded`** — проверьте, какой из сервисов в `services` равен `false`, и его адрес в `.env`.
+
+## Структура проекта
+
+```
+app/
+├── main.py            # сборка приложения и lifespan (создание HTTP-клиента и сервисов)
+├── __main__.py        # запуск: python -m app
+├── core/              # конфигурация, логирование, исключения
+├── api/
+│   ├── deps.py        # зависимости FastAPI
+│   └── routers/       # HTTP-эндпоинты (convert, health)
+├── schemas/           # pydantic-схемы ответов
+├── services/          # выбор способа обработки файла, очистка текста, работа с PDF и изображениями
+└── clients/           # клиенты Docling, vLLM и OCR-сервера
+tests/                 # pytest
+```
+
+## Разработка
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install          # ruff и mypy перед каждым коммитом
+ruff check . && ruff format --check . && mypy app
+pytest
+```
+
+Те же проверки запускаются в GitHub Actions (`.github/workflows/ci.yml`).

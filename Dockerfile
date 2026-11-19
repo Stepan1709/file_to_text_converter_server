@@ -12,15 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY config.py to_text_server.py ./
+COPY app ./app
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8999
 
-# /live не зависит от внешних сервисов, поэтому контейнер не помечается unhealthy при их недоступности
+# /live не зависит от внешних сервисов, поэтому контейнер не помечается unhealthy при недоступности внешних сервисов
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fs http://localhost:8999/live || exit 1
 
-CMD ["python", "to_text_server.py"]
+CMD ["python", "-m", "app"]

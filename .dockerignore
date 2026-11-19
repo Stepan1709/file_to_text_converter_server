@@ -8,3 +8,10 @@ __pycache__
 *.log
 test_files
 README.md
+tests
+learning
+.github
+test_files
+.pytest_cache
+.mypy_cache
+.ruff_cache
